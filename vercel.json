@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/clickup-web",
+      "destination": "/api/clickup-auth-web"
+    }
+  ]
+}
