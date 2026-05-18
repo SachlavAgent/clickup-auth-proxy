@@ -226,11 +226,11 @@ export default async function handler(req, res) {
     });
   }
 
-  const listId = (process.env.CLICKUP_LIST_ID ?? '').trim();
+  const listId = (process.env.CLICKUP_LIST_ID ?? process.env.CLIENT_LIST_ID ?? '').trim();
   if (!listId) {
     return res.status(500).json({
       error: 'clickup_list_id_not_configured',
-      message: 'Set CLICKUP_LIST_ID in Vercel environment variables.',
+      message: 'Set CLICKUP_LIST_ID (or CLIENT_LIST_ID) in Vercel environment variables.',
     });
   }
 
