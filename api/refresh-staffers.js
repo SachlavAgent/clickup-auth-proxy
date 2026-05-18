@@ -1,26 +1,25 @@
-import { Redis } from "@upstash/redis";
+import { createClient } from 'redis';
 
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+const CACHE_KEY = 'sachlav:staffers:cache:v1';
+const TOKEN_KEY = 'sachlav:admin:clickup-token:v1';
+const CLICKUP_BASE = 'https://api.clickup.com/api/v2';
 
-const CACHE_KEY = "sachlav:staffers:cache:v1";
-const TOKEN_KEY = "sachlav:admin:clickup-token:v1";
-const CLICKUP_BASE = "https://api.clickup.com/api/v2";
+let redisClient = null;
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+async function getRedisClient() {
+  if (redisClient) return redisClient;
+  redisClient = createClient({ url: process.env.REDIS_URL });
+  redisClient.on('error', (err) => console.error('Redis error:', err));
+  await redisClient.connect();
+  return redisClient;
 }
 
 // ── Field parsing helpers (mirrored from expo/services/clickup.ts) ────────────
 
 function normalizeName(name) {
   return name
-    .replace(/[\p{Extended_Pictographic}\p{Emoji_Presentation}️]/gu, "")
-    .replace(/\s+/g, " ")
+    .replace(/[\p{Extended_Pictographic}\p{Emoji_Presentation}️]/gu, '')
+    .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
 }
@@ -40,22 +39,22 @@ function readFirstField(fields, names) {
 }
 
 function asString(value) {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number") return String(value);
-  return "";
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return String(value);
+  return '';
 }
 
 function parseDropdownOrText(field) {
-  if (!field) return "";
+  if (!field) return '';
   const raw = field.value;
   const options = field.type_config?.options;
   if (options) {
-    if (typeof raw === "string") {
+    if (typeof raw === 'string') {
       const match = options.find((o) => o.id === raw);
       if (match) return match.name;
     }
-    if (typeof raw === "number") {
+    if (typeof raw === 'number') {
       const byOrder = options.find((o) => o.orderindex === raw);
       if (byOrder) return byOrder.name;
       const byIndex = options[raw];
@@ -64,34 +63,34 @@ function parseDropdownOrText(field) {
     if (Array.isArray(raw)) {
       const names = raw
         .map((id) => {
-          if (typeof id === "string") return options.find((o) => o.id === id)?.name;
-          if (typeof id === "number") return options.find((o) => o.orderindex === id)?.name ?? options[id]?.name;
+          if (typeof id === 'string') return options.find((o) => o.id === id)?.name;
+          if (typeof id === 'number') return options.find((o) => o.orderindex === id)?.name ?? options[id]?.name;
           return undefined;
         })
         .filter(Boolean);
-      if (names.length > 0) return names.join(", ");
+      if (names.length > 0) return names.join(', ');
     }
   }
   if (Array.isArray(raw)) {
     const names = raw
       .map((entry) => {
-        if (entry && typeof entry === "object" && "name" in entry) return entry.name ?? "";
-        return "";
+        if (entry && typeof entry === 'object' && 'name' in entry) return entry.name ?? '';
+        return '';
       })
       .filter((s) => !!s);
-    if (names.length > 0) return names.join(", ");
+    if (names.length > 0) return names.join(', ');
   }
   return asString(raw);
 }
 
 function parseDateIso(field) {
-  if (!field || field.value === null || field.value === undefined) return "";
+  if (!field || field.value === null || field.value === undefined) return '';
   const raw =
-    typeof field.value === "object" && field.value !== null && "date" in field.value
+    typeof field.value === 'object' && field.value !== null && 'date' in field.value
       ? field.value.date
       : field.value;
-  const num = typeof raw === "string" ? Number(raw) : typeof raw === "number" ? raw : NaN;
-  if (!Number.isFinite(num)) return "";
+  const num = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : NaN;
+  if (!Number.isFinite(num)) return '';
   return new Date(num).toISOString();
 }
 
@@ -101,67 +100,67 @@ function parseRelationshipIds(field) {
   if (!Array.isArray(raw)) return [];
   return raw
     .map((entry) => {
-      if (typeof entry === "string") return entry;
-      if (entry && typeof entry === "object" && "id" in entry) return entry.id;
+      if (typeof entry === 'string') return entry;
+      if (entry && typeof entry === 'object' && 'id' in entry) return entry.id;
       return null;
     })
-    .filter((v) => typeof v === "string");
+    .filter((v) => typeof v === 'string');
 }
 
 function parseRelationshipNames(field) {
-  if (!field) return "";
+  if (!field) return '';
   const raw = field.value;
-  if (!Array.isArray(raw)) return "";
-  const names = raw
+  if (!Array.isArray(raw)) return '';
+  return raw
     .map((entry) => {
-      if (entry && typeof entry === "object" && "name" in entry) return entry.name ?? "";
-      return "";
+      if (entry && typeof entry === 'object' && 'name' in entry) return entry.name ?? '';
+      return '';
     })
-    .filter((s) => !!s);
-  return names.join(", ");
+    .filter((s) => !!s)
+    .join(', ');
 }
 
 function parseRelationshipStatus(field) {
-  if (!field) return "";
+  if (!field) return '';
   const raw = field.value;
-  if (!Array.isArray(raw)) return "";
+  if (!Array.isArray(raw)) return '';
   for (const entry of raw) {
-    if (entry && typeof entry === "object" && "status" in entry) {
+    if (entry && typeof entry === 'object' && 'status' in entry) {
       const s = entry.status;
-      if (typeof s === "string") return s;
-      if (s && typeof s === "object" && "status" in s) {
+      if (typeof s === 'string') return s;
+      if (s && typeof s === 'object' && 'status' in s) {
         const inner = s.status;
-        if (typeof inner === "string") return inner;
+        if (typeof inner === 'string') return inner;
       }
     }
   }
-  return "";
+  return '';
 }
 
 function mapTask(task) {
   const fields = task.custom_fields ?? [];
-  const emailField = readFirstField(fields, ["Email", "E-mail"]);
-  const phoneField = readFirstField(fields, ["Phone Number", "Phone"]);
-  const tripIdField = readFirstField(fields, ["Trip ID", "TripID", "Trip Id", "Taglit", "Trip ID=Taglit"]);
-  const departureField = readFirstField(fields, ["Departure Date", "Departure", "🛫 Departure Date"]);
+  const emailField = readFirstField(fields, ['Email', 'E-mail']);
+  const phoneField = readFirstField(fields, ['Phone Number', 'Phone']);
+  const tripIdField = readFirstField(fields, ['Trip ID', 'TripID', 'Trip Id', 'Taglit', 'Trip ID=Taglit']);
+  const departureField = readFirstField(fields, ['Departure Date', 'Departure', '🛫 Departure Date']);
   const returnField = readFirstField(fields, [
-    "Return Arrival Date", "Return Date", "Arrival Date",
-    "Return/Arrival Date", "🛬 Return Arrival Date",
+    'Return Arrival Date', 'Return Date', 'Arrival Date',
+    'Return/Arrival Date', '🛬 Return Arrival Date',
   ]);
-  const coStaffField = readFirstField(fields, ["Co-Staff", "Co Staff", "CoStaff", "Co-staff"]);
-  const gatewayField = readFirstField(fields, ["Gateway", "Departure Gateway", "Airport"]);
-  const passwordField = readFirstField(fields, ["Portal Password", "Password", "Staffer Password", "Login Password"]);
-  const hotelNameField = readFirstField(fields, ["Hotel Name", "Hotel", "Hotel/Venue"]);
-  const hotelCityField = readFirstField(fields, ["Hotel City", "City", "Location City"]);
-  const checkInField = readFirstField(fields, ["Check-in Date", "Check In Date", "Checkin Date", "Hotel Check-in"]);
-  const checkOutField = readFirstField(fields, ["Check-out Date", "Check Out Date", "Checkout Date", "Hotel Check-out"]);
+  const coStaffField = readFirstField(fields, ['Co-Staff', 'Co Staff', 'CoStaff', 'Co-staff']);
+  const gatewayField = readFirstField(fields, ['Gateway', 'Departure Gateway', 'Airport']);
+  const passwordField = readFirstField(fields, ['Portal Password', 'Password', 'Staffer Password', 'Login Password']);
+  const hotelNameField = readFirstField(fields, ['Hotel Name', 'Hotel', 'Hotel/Venue']);
+  const hotelCityField = readFirstField(fields, ['Hotel City', 'City', 'Location City']);
+  const checkInField = readFirstField(fields, ['Check-in Date', 'Check In Date', 'Checkin Date', 'Hotel Check-in']);
+  const checkOutField = readFirstField(fields, ['Check-out Date', 'Check Out Date', 'Checkout Date', 'Hotel Check-out']);
 
   const coStaffIds = parseRelationshipIds(coStaffField);
-  const coStaffText = coStaffIds.length === 0 ? parseDropdownOrText(coStaffField) : "";
+  const coStaffText = coStaffIds.length === 0 ? parseDropdownOrText(coStaffField) : '';
 
   return {
     id: task.id,
-    name: task.name?.trim() ?? "",
+    name: task.name?.trim() ?? '',
     email: asString(emailField?.value).trim(),
     phone: asString(phoneField?.value).trim(),
     tripId: parseRelationshipNames(tripIdField) || parseDropdownOrText(tripIdField),
@@ -170,7 +169,7 @@ function mapTask(task) {
     coStaffTaskIds: coStaffIds,
     coStaffName: coStaffText || null,
     tripTaskIds: parseRelationshipIds(tripIdField),
-    status: task.status?.status ?? "",
+    status: task.status?.status ?? '',
     gateway: parseDropdownOrText(gatewayField).trim(),
     password: asString(passwordField?.value).trim(),
     hotelName: parseDropdownOrText(hotelNameField).trim(),
@@ -188,7 +187,7 @@ async function fetchAllStaffers(token, listId) {
   for (;;) {
     const url = `${CLICKUP_BASE}/list/${encodeURIComponent(listId)}/task?include_closed=true&subtasks=true&page=${page}`;
     const res = await fetch(url, {
-      headers: { Authorization: token, Accept: "application/json" },
+      headers: { Authorization: token, Accept: 'application/json' },
     });
     if (!res.ok) {
       const text = await res.text();
@@ -205,71 +204,55 @@ async function fetchAllStaffers(token, listId) {
 }
 
 export default async function handler(req, res) {
-  setCors(res);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
+  if (req.method === 'OPTIONS') return res.status(204).end();
 
-  if (req.method !== "GET") {
-    res.status(405).json({ error: "method_not_allowed" });
-    return;
-  }
+  if (req.method !== 'GET') return res.status(405).json({ error: 'method_not_allowed' });
 
   // Vercel automatically sends CRON_SECRET in the Authorization header for cron invocations
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret) {
-    const provided = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-    if (provided !== cronSecret) {
-      res.status(401).json({ error: "unauthorized" });
-      return;
-    }
+    const provided = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+    if (provided !== cronSecret) return res.status(401).json({ error: 'unauthorized' });
   }
 
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
-    res.status(500).json({ error: "redis_not_configured" });
-    return;
-  }
-
-  const listId = (process.env.CLICKUP_LIST_ID ?? "").trim();
+  const listId = (process.env.CLICKUP_LIST_ID ?? '').trim();
   if (!listId) {
-    res.status(500).json({
-      error: "clickup_list_id_not_configured",
-      message: "Set CLICKUP_LIST_ID in Vercel environment variables.",
+    return res.status(500).json({
+      error: 'clickup_list_id_not_configured',
+      message: 'Set CLICKUP_LIST_ID in Vercel environment variables.',
     });
-    return;
   }
 
   try {
-    const tokenPayload = await redis.get(TOKEN_KEY);
-    if (!tokenPayload) {
-      res.status(200).json({
+    const redis = await getRedisClient();
+
+    const tokenRaw = await redis.get(TOKEN_KEY);
+    if (!tokenRaw) {
+      return res.status(200).json({
         ok: false,
-        reason: "no_token",
-        message: "No admin ClickUp token stored yet. Admin must connect ClickUp in the app first.",
+        reason: 'no_token',
+        message: 'No admin ClickUp token stored yet. Admin must connect ClickUp in the app first.',
       });
-      return;
     }
 
-    const token =
-      typeof tokenPayload === "string"
-        ? (() => { try { return JSON.parse(tokenPayload)?.token ?? tokenPayload; } catch { return tokenPayload; } })()
-        : tokenPayload?.token;
-
-    if (!token || typeof token !== "string") {
-      res.status(200).json({ ok: false, reason: "invalid_token_shape" });
-      return;
+    const parsed = typeof tokenRaw === 'string' ? JSON.parse(tokenRaw) : tokenRaw;
+    const token = parsed?.token ?? tokenRaw;
+    if (!token || typeof token !== 'string') {
+      return res.status(200).json({ ok: false, reason: 'invalid_token_shape' });
     }
 
     const staffers = await fetchAllStaffers(token, listId);
     const value = { staffers, updatedAt: new Date().toISOString() };
     await redis.set(CACHE_KEY, JSON.stringify(value));
 
-    console.log("[api/refresh-staffers] refreshed", staffers.length, "staffers");
-    res.status(200).json({ ok: true, count: staffers.length, updatedAt: value.updatedAt });
+    console.log('[api/refresh-staffers] refreshed', staffers.length, 'staffers');
+    return res.status(200).json({ ok: true, count: staffers.length, updatedAt: value.updatedAt });
   } catch (err) {
-    console.error("[api/refresh-staffers] error", err);
-    res.status(500).json({ error: "server_error", message: String(err?.message || err) });
+    console.error('[api/refresh-staffers] error:', err);
+    return res.status(500).json({ error: 'internal_server_error' });
   }
 }
