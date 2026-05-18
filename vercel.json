@@ -4,5 +4,11 @@
       "source": "/clickup-web",
       "destination": "/api/clickup-auth-web"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/refresh-staffers",
+      "schedule": "0 * * * *"
+    }
   ]
 }
