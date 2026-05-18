@@ -1,7 +1,6 @@
 import { createClient } from 'redis';
 
 const CACHE_KEY = 'sachlav:staffers:cache:v1';
-const TOKEN_KEY = 'sachlav:admin:clickup-token:v1';
 const CLICKUP_BASE = 'https://api.clickup.com/api/v2';
 
 let redisClient = null;
@@ -191,7 +190,7 @@ async function fetchAllStaffers(token, listId) {
     });
     if (!res.ok) {
       const text = await res.text();
-      if (res.status === 401) throw new Error(`ClickUp token expired (401): ${text.slice(0, 200)}`);
+      if (res.status === 401) throw new Error(`ClickUp token invalid (401): ${text.slice(0, 200)}`);
       throw new Error(`ClickUp fetch failed (${res.status}): ${text.slice(0, 200)}`);
     }
     const data = await res.json();
@@ -219,6 +218,14 @@ export default async function handler(req, res) {
     if (provided !== cronSecret) return res.status(401).json({ error: 'unauthorized' });
   }
 
+  const token = (process.env.CLICKUP_API_TOKEN ?? '').trim();
+  if (!token) {
+    return res.status(500).json({
+      error: 'clickup_api_token_not_configured',
+      message: 'Set CLICKUP_API_TOKEN in Vercel environment variables.',
+    });
+  }
+
   const listId = (process.env.CLICKUP_LIST_ID ?? '').trim();
   if (!listId) {
     return res.status(500).json({
@@ -228,25 +235,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const redis = await getRedisClient();
-
-    const tokenRaw = await redis.get(TOKEN_KEY);
-    if (!tokenRaw) {
-      return res.status(200).json({
-        ok: false,
-        reason: 'no_token',
-        message: 'No admin ClickUp token stored yet. Admin must connect ClickUp in the app first.',
-      });
-    }
-
-    const parsed = typeof tokenRaw === 'string' ? JSON.parse(tokenRaw) : tokenRaw;
-    const token = parsed?.token ?? tokenRaw;
-    if (!token || typeof token !== 'string') {
-      return res.status(200).json({ ok: false, reason: 'invalid_token_shape' });
-    }
-
     const staffers = await fetchAllStaffers(token, listId);
     const value = { staffers, updatedAt: new Date().toISOString() };
+
+    const redis = await getRedisClient();
     await redis.set(CACHE_KEY, JSON.stringify(value));
 
     console.log('[api/refresh-staffers] refreshed', staffers.length, 'staffers');
