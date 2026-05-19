@@ -219,23 +219,17 @@ export default async function handler(req, res) {
   }
 
   const listId = (process.env.CLICKUP_PARTICIPANTS_LIST_ID ?? '901811520991').trim();
-  const groupId = (req.query.groupId ?? '').trim();
+  const tripTaskId = (req.query.tripTaskId ?? '').trim();
 
   try {
     const tasks = await fetchAllTasks(token, listId);
     let participants = tasks.map(mapParticipant);
 
-    if (groupId) {
-      const targetKey = normalizeForMatch(groupId);
-      participants = participants.filter((p) => {
-        const candidates = [p.assignedGroup, ...p.assignedGroupValues]
-          .map(normalizeForMatch)
-          .filter((c) => c.length > 0);
-        return candidates.some((c) => c === targetKey);
-      });
+    if (tripTaskId) {
+      participants = participants.filter((p) => p.assignedGroupIds.includes(tripTaskId));
     }
 
-    console.log(`[api/participants] listId=${listId} groupId=${groupId || '(all)'} returned=${participants.length}`);
+    console.log(`[api/participants] listId=${listId} tripTaskId=${tripTaskId || '(all)'} returned=${participants.length}`);
     return res.status(200).json({ participants });
   } catch (err) {
     console.error('[api/participants] error:', err);
