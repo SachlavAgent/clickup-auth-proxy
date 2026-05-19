@@ -221,23 +221,44 @@ function mapParticipant(task) {
 
 async function fetchAllParticipants(token, listId) {
   const PAGE_SIZE = 100;
-  const tasks = [];
-  let page = 0;
-  for (;;) {
+
+  async function fetchOnePage(page) {
     const url = `${CLICKUP_BASE}/list/${encodeURIComponent(listId)}/task?include_closed=true&subtasks=true&page=${page}`;
     const res = await fetch(url, { headers: { Authorization: token, Accept: 'application/json' } });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`ClickUp participants fetch failed (${res.status}): ${text.slice(0, 200)}`);
     }
-    const data = await res.json();
-    const pageTasks = data.tasks ?? [];
-    tasks.push(...pageTasks);
-    console.log(`[api/refresh-staffers] participants page=${page} fetched=${pageTasks.length} total=${tasks.length}`);
-    if (pageTasks.length < PAGE_SIZE) break;
-    page += 1;
+    return res.json();
   }
-  return tasks.map(mapParticipant);
+
+  // Fetch page 0 first to get total count and first batch
+  const data0 = await fetchOnePage(0);
+  const page0Tasks = data0.tasks ?? [];
+  console.log(`[api/refresh-staffers] participants page=0 fetched=${page0Tasks.length}`);
+
+  if (page0Tasks.length < PAGE_SIZE) {
+    return page0Tasks.map(mapParticipant);
+  }
+
+  // ClickUp returns total_count on some plans; fall back to a safe upper bound
+  const totalCount = data0.total_count ?? null;
+  const totalPages = totalCount != null ? Math.ceil(totalCount / PAGE_SIZE) : 100;
+  const remainingNums = Array.from({ length: totalPages - 1 }, (_, i) => i + 1);
+
+  console.log(`[api/refresh-staffers] fetching pages 1–${totalPages - 1} in parallel (total_count=${totalCount ?? 'unknown'})`);
+
+  const pageResults = await Promise.all(
+    remainingNums.map(async (page) => {
+      const data = await fetchOnePage(page);
+      return data.tasks ?? [];
+    })
+  );
+
+  // Flatten; over-speculated empty pages are harmless
+  const allTasks = [page0Tasks, ...pageResults.flat()];
+  console.log(`[api/refresh-staffers] participants total=${allTasks.length}`);
+  return allTasks.map(mapParticipant);
 }
 
 // ── Staffer mapper ────────────────────────────────────────────────────────────
