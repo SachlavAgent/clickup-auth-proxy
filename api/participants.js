@@ -215,7 +215,7 @@ function mapParticipant(task) {
 // ── ClickUp fetch ─────────────────────────────────────────────────────────────
 
 async function fetchAllTasks(token, listId) {
-  const pageSize = 100;
+  const PAGE_SIZE = 100;
   const tasks = [];
   let page = 0;
   for (;;) {
@@ -229,10 +229,12 @@ async function fetchAllTasks(token, listId) {
       throw new Error(`ClickUp fetch failed (${res.status}): ${text.slice(0, 200)}`);
     }
     const data = await res.json();
-    tasks.push(...(data.tasks ?? []));
-    if (data.last_page || (data.tasks ?? []).length < pageSize) break;
+    const pageTasks = data.tasks ?? [];
+    tasks.push(...pageTasks);
+    console.log(`[api/participants] page=${page} fetched=${pageTasks.length} total=${tasks.length}`);
+    // Stop when we get a partial page — that means there are no more pages
+    if (pageTasks.length < PAGE_SIZE) break;
     page += 1;
-    if (page > 20) break;
   }
   return tasks;
 }
