@@ -138,7 +138,7 @@ function parseRelationshipStatus(field) {
 
 // ── Participant helpers ───────────────────────────────────────────────────────
 
-const PARTICIPANTS_CACHE_KEY = 'participants:cache:v1';
+const PARTICIPANTS_CACHE_KEY = 'participants:cache:v2';
 const PARTICIPANTS_ASSIGNED_GROUP_FIELD_ID = '7b11937f-2af8-41c9-8ed8-f38604be3ef5';
 const PARTICIPANT_GROUP_FIELD_NAMES = [
   'Assigned Group', 'AssignedGroup', 'Assigned group',
@@ -162,7 +162,7 @@ function mapParticipant(task) {
   const phoneField = readFirstField(fields, ['Phone Number', 'Phone', 'Mobile', 'Cell']);
   const sfStatusField = readFirstField(fields, ['SF Status', 'SFStatus', 'SF status']);
   const paymentStatusField = readFirstField(fields, ['Payment Status', 'PaymentStatus', 'Payment']);
-  const passportField = readFirstField(fields, ['Passport', 'passport']);
+  const passportStatusField = readFirstField(fields, ['Passport Status', 'PassportStatus', 'Passport status']);
   const etaIlField = readFirstField(fields, ['ETA-IL', 'ETA IL', 'ETAIL', 'eta-il']);
   const interviewStatusField = readFirstField(fields, ['Interview Status', 'InterviewStatus', 'Interview']);
 
@@ -208,7 +208,8 @@ function mapParticipant(task) {
     status: task.status?.status ?? '',
     sfStatus: parseDropdownOrText(sfStatusField).trim(),
     paymentStatus: parseDropdownOrText(paymentStatusField).trim(),
-    passport: parseCheckbox(passportField),
+    passportStatus: parseDropdownOrText(passportStatusField).trim(),
+    passportVerified: parseDropdownOrText(passportStatusField).trim() === 'Verified',
     etaIl: parseCheckbox(etaIlField),
     interviewStatus: parseDropdownOrText(interviewStatusField).trim(),
     allFieldTexts: [],
