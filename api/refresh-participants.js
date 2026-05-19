@@ -243,12 +243,6 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'method_not_allowed' });
 
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret) {
-    const provided = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
-    if (provided !== cronSecret) return res.status(401).json({ error: 'unauthorized' });
-  }
-
   const token = (process.env.CLICKUP_API_TOKEN ?? '').trim();
   if (!token) {
     return res.status(500).json({
