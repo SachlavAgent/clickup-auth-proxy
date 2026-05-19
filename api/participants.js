@@ -147,12 +147,23 @@ function normalizeForMatch(s) {
   return s.replace(/\s+/g, '').replace(/[^a-z0-9]/gi, '').toLowerCase();
 }
 
+function parseCheckbox(field) {
+  if (!field) return false;
+  const v = field.value;
+  return v === true || v === 1 || v === '1' || v === 'true';
+}
+
 // ── Participant mapper ────────────────────────────────────────────────────────
 
 function mapParticipant(task) {
   const fields = task.custom_fields ?? [];
   const emailField = readFirstField(fields, ['Email', 'E-mail', 'Email Address']);
   const phoneField = readFirstField(fields, ['Phone Number', 'Phone', 'Mobile', 'Cell']);
+  const sfStatusField = readFirstField(fields, ['SF Status', 'SFStatus', 'SF status']);
+  const paymentStatusField = readFirstField(fields, ['Payment Status', 'PaymentStatus', 'Payment']);
+  const passportField = readFirstField(fields, ['Passport', 'passport']);
+  const etaIlField = readFirstField(fields, ['ETA-IL', 'ETA IL', 'ETAIL', 'eta-il']);
+  const interviewStatusField = readFirstField(fields, ['Interview Status', 'InterviewStatus', 'Interview']);
 
   const groupFieldById = fields.find((f) => f.id === ASSIGNED_GROUP_FIELD_ID) ?? null;
   const nameMatchedCandidates = GROUP_FIELD_NAMES
@@ -205,6 +216,11 @@ function mapParticipant(task) {
     assignedGroupValues,
     assignedGroupIds,
     status: task.status?.status ?? '',
+    sfStatus: parseDropdownOrText(sfStatusField).trim(),
+    paymentStatus: parseDropdownOrText(paymentStatusField).trim(),
+    passport: parseCheckbox(passportField),
+    etaIl: parseCheckbox(etaIlField),
+    interviewStatus: parseDropdownOrText(interviewStatusField).trim(),
     allFieldTexts: [],
     allRelationshipIds: [],
     assignedGroupDebug: [],
