@@ -136,6 +136,111 @@ function parseRelationshipStatus(field) {
   return '';
 }
 
+// ── Participant helpers ───────────────────────────────────────────────────────
+
+const PARTICIPANTS_CACHE_KEY = 'participants:cache:v1';
+const PARTICIPANTS_ASSIGNED_GROUP_FIELD_ID = '7b11937f-2af8-41c9-8ed8-f38604be3ef5';
+const PARTICIPANT_GROUP_FIELD_NAMES = [
+  'Assigned Group', 'AssignedGroup', 'Assigned group',
+  'Assigned Trip', 'Assigned Trip ID', 'Trip Group',
+  'Group', 'Trip', 'Trip ID', 'Taglit', 'Trip ID=Taglit',
+];
+
+function parseCheckbox(field) {
+  if (!field) return false;
+  const v = field.value;
+  return v === true || v === 1 || v === '1' || v === 'true';
+}
+
+function splitMulti(value) {
+  return value.split(/[,;|]/).map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+function mapParticipant(task) {
+  const fields = task.custom_fields ?? [];
+  const emailField = readFirstField(fields, ['Email', 'E-mail', 'Email Address']);
+  const phoneField = readFirstField(fields, ['Phone Number', 'Phone', 'Mobile', 'Cell']);
+  const sfStatusField = readFirstField(fields, ['SF Status', 'SFStatus', 'SF status']);
+  const paymentStatusField = readFirstField(fields, ['Payment Status', 'PaymentStatus', 'Payment']);
+  const passportField = readFirstField(fields, ['Passport', 'passport']);
+  const etaIlField = readFirstField(fields, ['ETA-IL', 'ETA IL', 'ETAIL', 'eta-il']);
+  const interviewStatusField = readFirstField(fields, ['Interview Status', 'InterviewStatus', 'Interview']);
+
+  const groupFieldById = fields.find((f) => f.id === PARTICIPANTS_ASSIGNED_GROUP_FIELD_ID) ?? null;
+  const nameMatchedCandidates = PARTICIPANT_GROUP_FIELD_NAMES
+    .map((n) => readFieldValue(fields, n))
+    .filter(Boolean)
+    .filter((f) => !groupFieldById || f.id !== groupFieldById.id);
+  const groupFieldCandidates = groupFieldById ? [groupFieldById, ...nameMatchedCandidates] : nameMatchedCandidates;
+
+  const relNamesParts = [];
+  const dropdownParts = [];
+  const idsSet = new Set();
+  for (const f of groupFieldCandidates) {
+    const rn = parseRelationshipNames(f);
+    if (rn) relNamesParts.push(rn);
+    const dt = parseDropdownOrText(f);
+    if (dt) dropdownParts.push(dt);
+    for (const id of parseRelationshipIds(f)) idsSet.add(id);
+  }
+  const relNames = relNamesParts.join(', ');
+  const dropdownOrText = dropdownParts.join(', ');
+  let assignedGroup = (relNames || dropdownOrText).trim();
+  const assignedGroupIds = Array.from(idsSet);
+  const assignedGroupValues = Array.from(new Set([...splitMulti(relNames), ...splitMulti(dropdownOrText)]));
+
+  if (!assignedGroup) {
+    for (const f of fields) {
+      const text = parseRelationshipNames(f) || parseDropdownOrText(f);
+      const match = splitMulti(text).find((v) => /[A-Z]{2,}-[A-Z0-9]{2,}-\d/.test(v));
+      if (match) { assignedGroup = match; assignedGroupValues.push(match); break; }
+    }
+  }
+
+  return {
+    id: task.id,
+    name: task.name?.trim() ?? '',
+    email: asString(emailField?.value).trim(),
+    phone: asString(phoneField?.value).trim(),
+    assignedGroup: assignedGroup.trim(),
+    assignedGroupValues,
+    assignedGroupIds,
+    status: task.status?.status ?? '',
+    sfStatus: parseDropdownOrText(sfStatusField).trim(),
+    paymentStatus: parseDropdownOrText(paymentStatusField).trim(),
+    passport: parseCheckbox(passportField),
+    etaIl: parseCheckbox(etaIlField),
+    interviewStatus: parseDropdownOrText(interviewStatusField).trim(),
+    allFieldTexts: [],
+    allRelationshipIds: [],
+    assignedGroupDebug: [],
+    groupLikeFieldsDebug: [],
+  };
+}
+
+async function fetchAllParticipants(token, listId) {
+  const PAGE_SIZE = 100;
+  const tasks = [];
+  let page = 0;
+  for (;;) {
+    const url = `${CLICKUP_BASE}/list/${encodeURIComponent(listId)}/task?include_closed=true&subtasks=true&page=${page}`;
+    const res = await fetch(url, { headers: { Authorization: token, Accept: 'application/json' } });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`ClickUp participants fetch failed (${res.status}): ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const pageTasks = data.tasks ?? [];
+    tasks.push(...pageTasks);
+    console.log(`[api/refresh-staffers] participants page=${page} fetched=${pageTasks.length} total=${tasks.length}`);
+    if (pageTasks.length < PAGE_SIZE) break;
+    page += 1;
+  }
+  return tasks.map(mapParticipant);
+}
+
+// ── Staffer mapper ────────────────────────────────────────────────────────────
+
 function mapTask(task) {
   const fields = task.custom_fields ?? [];
   const emailField = readFirstField(fields, ['Email', 'E-mail']);
@@ -234,17 +339,39 @@ export default async function handler(req, res) {
     });
   }
 
+  const participantsListId = (process.env.CLICKUP_PARTICIPANTS_LIST_ID ?? '901811520991').trim();
+
   try {
-    const staffers = await fetchAllStaffers(token, listId);
-    const value = { staffers, updatedAt: new Date().toISOString() };
-
     const redis = await getRedisClient();
-    await redis.set(CACHE_KEY, JSON.stringify(value));
 
+    // Refresh staffers
+    const staffers = await fetchAllStaffers(token, listId);
+    const staffersValue = { staffers, updatedAt: new Date().toISOString() };
+    await redis.set(CACHE_KEY, JSON.stringify(staffersValue));
     console.log('[api/refresh-staffers] refreshed', staffers.length, 'staffers');
-    return res.status(200).json({ ok: true, count: staffers.length, updatedAt: value.updatedAt });
+
+    // Refresh participants — group by assignedGroupIds UUID
+    const allParticipants = await fetchAllParticipants(token, participantsListId);
+    const byGroup = {};
+    for (const p of allParticipants) {
+      for (const uuid of p.assignedGroupIds) {
+        if (!byGroup[uuid]) byGroup[uuid] = [];
+        byGroup[uuid].push(p);
+      }
+    }
+    const participantsValue = { byGroup, updatedAt: staffersValue.updatedAt };
+    await redis.set(PARTICIPANTS_CACHE_KEY, JSON.stringify(participantsValue));
+    console.log('[api/refresh-staffers] cached participants total=', allParticipants.length, 'groups=', Object.keys(byGroup).length);
+
+    return res.status(200).json({
+      ok: true,
+      staffers: staffers.length,
+      participants: allParticipants.length,
+      participantGroups: Object.keys(byGroup).length,
+      updatedAt: staffersValue.updatedAt,
+    });
   } catch (err) {
     console.error('[api/refresh-staffers] error:', err);
-    return res.status(500).json({ error: 'internal_server_error' });
+    return res.status(500).json({ error: 'internal_server_error', message: err.message });
   }
 }

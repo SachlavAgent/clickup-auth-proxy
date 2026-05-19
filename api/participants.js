@@ -1,5 +1,17 @@
+import { createClient } from 'redis';
+
 const CLICKUP_BASE = 'https://api.clickup.com/api/v2';
 const ASSIGNED_GROUP_FIELD_ID = '7b11937f-2af8-41c9-8ed8-f38604be3ef5';
+const PARTICIPANTS_CACHE_KEY = 'participants:cache:v1';
+
+let redisClient = null;
+async function getRedisClient() {
+  if (redisClient) return redisClient;
+  redisClient = createClient({ url: process.env.REDIS_URL });
+  redisClient.on('error', (err) => console.error('[participants] Redis error:', err));
+  await redisClient.connect();
+  return redisClient;
+}
 
 const GROUP_NAME_TO_UUID = {
   'SA-BR-54-333': 'cd14b78c-95c8-4bc7-a8a5-f340e6efaa4d',
@@ -278,6 +290,33 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'unknown_group_name', groupName });
   }
 
+  // ── Try Redis cache first ─────────────────────────────────────────────────
+  try {
+    const redis = await getRedisClient();
+    const cached = await redis.get(PARTICIPANTS_CACHE_KEY);
+    if (cached) {
+      const { byGroup } = JSON.parse(cached);
+      let participants;
+      if (tripTaskUuid) {
+        participants = byGroup[tripTaskUuid] ?? [];
+      } else {
+        // Flatten all groups, deduplicate by id
+        const seen = new Set();
+        participants = Object.values(byGroup).flat().filter((p) => {
+          if (seen.has(p.id)) return false;
+          seen.add(p.id);
+          return true;
+        });
+      }
+      console.log(`[api/participants] cache hit groupName=${groupName || '(all)'} returned=${participants.length}`);
+      return res.status(200).json({ participants, fromCache: true });
+    }
+    console.log('[api/participants] cache miss, falling back to ClickUp');
+  } catch (redisErr) {
+    console.warn('[api/participants] Redis unavailable, falling back to ClickUp:', redisErr.message);
+  }
+
+  // ── Fallback: fetch directly from ClickUp ─────────────────────────────────
   try {
     const tasks = await fetchAllTasks(token, listId);
     let participants = tasks.map(mapParticipant);
@@ -286,8 +325,8 @@ export default async function handler(req, res) {
       participants = participants.filter((p) => p.assignedGroupIds.includes(tripTaskUuid));
     }
 
-    console.log(`[api/participants] listId=${listId} groupName=${groupName || '(all)'} uuid=${tripTaskUuid || '(all)'} returned=${participants.length}`);
-    return res.status(200).json({ participants });
+    console.log(`[api/participants] live fetch groupName=${groupName || '(all)'} returned=${participants.length}`);
+    return res.status(200).json({ participants, fromCache: false });
   } catch (err) {
     console.error('[api/participants] error:', err);
     return res.status(500).json({ error: 'internal_server_error', message: err.message });
