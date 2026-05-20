@@ -150,6 +150,7 @@ function mapTask(task) {
   ]);
   const coStaffField = readFirstField(fields, ['Co-Staff', 'Co Staff', 'CoStaff', 'Co-staff']);
   const gatewayField = readFirstField(fields, ['Gateway', 'Departure Gateway', 'Airport']);
+  const genderField = readFirstField(fields, ['Gender', 'Sex', 'gender']);
   const passwordField = readFirstField(fields, ['Portal Password', 'Password', 'Staffer Password', 'Login Password']);
   const hotelNameField = readFirstField(fields, ['Hotel Name', 'Hotel', 'Hotel/Venue']);
   const hotelCityField = readFirstField(fields, ['Hotel City', 'City', 'Location City']);
@@ -178,6 +179,7 @@ function mapTask(task) {
     checkInDate: parseDateIso(checkInField),
     checkOutDate: parseDateIso(checkOutField),
     tripStatus: parseRelationshipStatus(tripIdField).trim(),
+    gender: parseDropdownOrText(genderField).trim(),
   };
 }
 
