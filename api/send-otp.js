@@ -1,8 +1,9 @@
 import { createClient } from 'redis';
 import { randomInt } from 'crypto';
+import nodemailer from 'nodemailer';
 
 const STAFFERS_KEY = 'sachlav:staffers:cache:v1';
-const OTP_TTL_SECONDS = 600; // 10 minutes
+const OTP_TTL_SECONDS = 600;
 
 let redisClient = null;
 
@@ -14,36 +15,62 @@ async function getRedisClient() {
   return redisClient;
 }
 
-// Firebase sends the email. The sign-in link redirects to /api/show-code
-// which displays the 6-digit code as an HTML page the user reads on their phone.
-async function sendViaFirebase(email, code) {
-  const apiKey = process.env.FIREBASE_API_KEY;
-  if (!apiKey) throw new Error('FIREBASE_API_KEY is not configured.');
+async function sendOtpEmail(to, code) {
+  const gmailUser = process.env.GMAIL_USER;
+  const gmailPass = process.env.GMAIL_APP_PASSWORD;
+  const resendKey = process.env.RESEND_API_KEY;
 
-  // show-code page lives on project-ks6k6.vercel.app.
-  // That domain must be in Firebase > Authentication > Settings > Authorized domains.
-  const showCodeUrl =
-    `https://project-ks6k6.vercel.app/api/show-code` +
-    `?code=${code}&e=${encodeURIComponent(email)}`;
+  const subject = 'Your Sachlav Staff Hub verification code';
+  const text = `Your Sachlav Staff Hub verification code is: ${code}\n\nThis code expires in 10 minutes. If you didn't request this, you can safely ignore this email.`;
+  const html = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;max-width:480px;margin:0 auto;padding:32px;background:#fff">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px">
+    <div style="width:44px;height:44px;background:#F4C55A;border-radius:12px;font-size:22px;font-weight:900;color:#1A1654;text-align:center;line-height:44px">S</div>
+    <div>
+      <div style="font-size:15px;font-weight:900;letter-spacing:2px;color:#1A1654">SACHLAV</div>
+      <div style="font-size:11px;color:#C99524;font-weight:700">Staff Hub</div>
+    </div>
+  </div>
+  <h2 style="color:#1A1654;margin:0 0 8px;font-size:22px;font-weight:800">Your verification code</h2>
+  <p style="color:#555;margin:0 0 24px;font-size:15px;line-height:1.5">Your Sachlav Staff Hub verification code is:</p>
+  <div style="background:#F4C55A;border-radius:12px;padding:20px 32px;text-align:center;font-size:44px;font-weight:900;letter-spacing:16px;color:#1A1654;margin-bottom:20px">${code}</div>
+  <p style="color:#555;font-size:14px;margin:0 0 4px">This code expires in <strong>10 minutes</strong>.</p>
+  <p style="color:#555;font-size:14px;margin:0 0 24px">Enter it in the Sachlav Staff Hub app to sign in.</p>
+  <p style="color:#999;font-size:12px;margin:0">If you didn't request this, you can safely ignore this email.</p>
+</div>`;
 
-  const res = await fetch(
-    `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        requestType: 'EMAIL_SIGNIN',
-        email,
-        continueUrl: showCodeUrl,
-      }),
-    }
-  );
-
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const msg = body?.error?.message ?? JSON.stringify(body);
-    throw new Error(`Firebase sendOobCode failed (${res.status}): ${msg}`);
+  if (gmailUser && gmailPass) {
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: { user: gmailUser, pass: gmailPass },
+    });
+    await transporter.sendMail({
+      from: `"Sachlav Staff Hub" <${gmailUser}>`,
+      to,
+      subject,
+      text,
+      html,
+    });
+    return;
   }
+
+  if (resendKey) {
+    const from = process.env.EMAIL_FROM ?? 'Sachlav Staff Hub <onboarding@resend.dev>';
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${resendKey}` },
+      body: JSON.stringify({ from, to: [to], subject, html, text }),
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      throw new Error(`Resend failed (${r.status}): ${body.slice(0, 200)}`);
+    }
+    return;
+  }
+
+  // Dev mode — no email provider configured, log the code to console.
+  console.log(`[send-otp] DEV MODE — OTP for ${to}: ${code}`);
 }
 
 export default async function handler(req, res) {
@@ -88,7 +115,7 @@ export default async function handler(req, res) {
     const redis = await getRedisClient();
     await redis.setEx(`otp:${email}`, OTP_TTL_SECONDS, code);
 
-    await sendViaFirebase(email, code);
+    await sendOtpEmail(email, code);
 
     return res.status(200).json({ ok: true });
   } catch (err) {
