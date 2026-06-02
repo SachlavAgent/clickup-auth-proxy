@@ -17,8 +17,7 @@ async function getRedisClient() {
 async function sendOtpEmail(to, code) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
-    console.log(`[send-otp] DEV — OTP for ${to}: ${code}`);
-    return;
+    throw new Error('RESEND_API_KEY is not configured. Add it to the Vercel project environment variables.');
   }
   const from = process.env.EMAIL_FROM ?? 'Sachlav Staff Hub <noreply@sachlav.app>';
   const res = await fetch('https://api.resend.com/emails', {
@@ -38,8 +37,8 @@ async function sendOtpEmail(to, code) {
     }),
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Resend failed (${res.status}): ${text.slice(0, 200)}`);
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`Resend error (${res.status}): ${body?.message ?? JSON.stringify(body)}`);
   }
 }
 
