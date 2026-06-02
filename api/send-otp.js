@@ -2,7 +2,7 @@ import { createClient } from 'redis';
 import { randomInt } from 'crypto';
 
 const STAFFERS_KEY = 'sachlav:staffers:cache:v1';
-const OTP_TTL_SECONDS = 600;
+const OTP_TTL_SECONDS = 600; // 10 minutes
 
 let redisClient = null;
 
@@ -14,31 +14,35 @@ async function getRedisClient() {
   return redisClient;
 }
 
-async function sendOtpEmail(to, code) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    throw new Error('RESEND_API_KEY is not configured. Add it to the Vercel project environment variables.');
-  }
-  const from = process.env.EMAIL_FROM ?? 'Sachlav Staff Hub <noreply@sachlav.app>';
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      from,
-      to: [to],
-      subject: 'Your Sachlav login code',
-      html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;max-width:480px;margin:0 auto;padding:32px;background:#fff">
-        <h2 style="color:#1A1654;margin:0 0 8px;font-size:22px">Your login code</h2>
-        <p style="color:#555;margin:0 0 24px;font-size:15px">Use this code to sign in to Sachlav Staff Hub. It expires in 10 minutes.</p>
-        <div style="background:#F4C55A;border-radius:12px;padding:20px 32px;text-align:center;font-size:40px;font-weight:900;letter-spacing:16px;color:#1A1654">${code}</div>
-        <p style="color:#999;font-size:12px;margin:24px 0 0">If you didn't request this, you can safely ignore this email.</p>
-      </div>`,
-      text: `Your Sachlav login code is: ${code}\n\nExpires in 10 minutes.`,
-    }),
-  });
+// Firebase sends the email. The sign-in link redirects to /api/show-code
+// which displays the 6-digit code as an HTML page the user reads on their phone.
+async function sendViaFirebase(email, code) {
+  const apiKey = process.env.FIREBASE_API_KEY;
+  if (!apiKey) throw new Error('FIREBASE_API_KEY is not configured.');
+
+  // show-code page lives on project-ks6k6.vercel.app.
+  // That domain must be in Firebase > Authentication > Settings > Authorized domains.
+  const showCodeUrl =
+    `https://project-ks6k6.vercel.app/api/show-code` +
+    `?code=${code}&e=${encodeURIComponent(email)}`;
+
+  const res = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestType: 'EMAIL_SIGNIN',
+        email,
+        continueUrl: showCodeUrl,
+      }),
+    }
+  );
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(`Resend error (${res.status}): ${body?.message ?? JSON.stringify(body)}`);
+    const msg = body?.error?.message ?? JSON.stringify(body);
+    throw new Error(`Firebase sendOobCode failed (${res.status}): ${msg}`);
   }
 }
 
@@ -83,7 +87,8 @@ export default async function handler(req, res) {
     const code = String(randomInt(100000, 1000000));
     const redis = await getRedisClient();
     await redis.setEx(`otp:${email}`, OTP_TTL_SECONDS, code);
-    await sendOtpEmail(email, code);
+
+    await sendViaFirebase(email, code);
 
     return res.status(200).json({ ok: true });
   } catch (err) {
