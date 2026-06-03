@@ -20,7 +20,7 @@ async function sendOtpEmail(to, code) {
   const gmailPass = process.env.GMAIL_APP_PASSWORD;
   const resendKey = process.env.RESEND_API_KEY;
 
-  const subject = 'Your Sachlav Staff Hub verification code';
+  const subject = 'Your Sachlav Staff Hub Login Code';
   const text = `Your Sachlav Staff Hub verification code is: ${code}\n\nThis code expires in 10 minutes. If you didn't request this, you can safely ignore this email.`;
   const html = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;max-width:480px;margin:0 auto;padding:32px;background:#fff">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px">
