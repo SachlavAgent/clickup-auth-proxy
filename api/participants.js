@@ -172,7 +172,7 @@ function mapParticipant(task) {
   const emailField = readFirstField(fields, ['Email', 'E-mail', 'Email Address']);
   const phoneField = readFirstField(fields, ['Phone Number', 'Phone', 'Mobile', 'Cell']);
   const sfStatusField = readFirstField(fields, ['SF Status', 'SFStatus', 'SF status']);
-  const emergencyContactsField = readFirstField(fields, ['Emergency Contacts Complete', 'Emergency Contacts']);
+  const emergencyContactsField = readFirstField(fields, ['Emergency Contacts Complete?', 'Emergency Contacts Complete', 'Emergency Contacts']);
   const passportStatusField = readFirstField(fields, ['Passport Status', 'PassportStatus', 'Passport status']);
   const etaIlField = readFirstField(fields, ['ETA-IL', 'ETA IL', 'ETAIL', 'eta-il']);
   const interviewStatusField = readFirstField(fields, ['Interview Status', 'InterviewStatus', 'Interview']);
