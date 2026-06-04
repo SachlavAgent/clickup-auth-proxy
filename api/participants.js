@@ -287,10 +287,47 @@ export default async function handler(req, res) {
 
   const listId = (process.env.CLICKUP_PARTICIPANTS_LIST_ID ?? '901811520991').trim();
   const groupName = (req.query.groupName ?? '').trim();
+  const debug = req.query.debug === '1';
 
   const tripTaskUuid = groupName ? (GROUP_NAME_TO_UUID[groupName] ?? null) : null;
   if (groupName && !tripTaskUuid) {
     return res.status(400).json({ error: 'unknown_group_name', groupName });
+  }
+
+  // ── Debug mode: return raw first participant including all fields ──────────
+  if (debug && groupName) {
+    try {
+      const tasks = await fetchAllTasks(token, listId);
+      const filtered = tripTaskUuid
+        ? tasks.filter((t) => {
+            const fields = t.custom_fields ?? [];
+            const groupField = fields.find((f) => f.id === ASSIGNED_GROUP_FIELD_ID);
+            const ids = groupField && Array.isArray(groupField.value)
+              ? groupField.value.map((e) => (typeof e === 'string' ? e : e?.id)).filter(Boolean)
+              : [];
+            return ids.includes(tripTaskUuid);
+          })
+        : tasks;
+      const first = filtered[0] ?? tasks[0] ?? null;
+      if (!first) return res.status(200).json({ debug: true, error: 'no tasks found' });
+      const mapped = mapParticipant(first);
+      return res.status(200).json({
+        debug: true,
+        groupName,
+        tripTaskUuid,
+        totalTasksInList: tasks.length,
+        tasksMatchingGroup: filtered.length,
+        mappedParticipant: mapped,
+        rawCustomFields: (first.custom_fields ?? []).map((f) => ({
+          id: f.id,
+          name: f.name,
+          type: f.type,
+          value: f.value,
+        })),
+      });
+    } catch (err) {
+      return res.status(500).json({ debug: true, error: err.message });
+    }
   }
 
   // ── Try Redis cache first ─────────────────────────────────────────────────
