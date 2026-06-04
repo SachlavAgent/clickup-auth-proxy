@@ -335,10 +335,13 @@ export default async function handler(req, res) {
     const redis = await getRedisClient();
     const cached = await redis.get(PARTICIPANTS_CACHE_KEY);
     if (cached) {
-      const { byGroup } = JSON.parse(cached);
+      const { byGroup, byGroupName } = JSON.parse(cached);
       let participants;
-      if (tripTaskUuid) {
-        participants = byGroup[tripTaskUuid] ?? [];
+      if (groupName) {
+        // Primary: direct name lookup (works regardless of UUID format)
+        // Fallback: UUID-based lookup via GROUP_NAME_TO_UUID
+        participants = (byGroupName && byGroupName[groupName])
+          ?? (tripTaskUuid ? (byGroup[tripTaskUuid] ?? []) : []);
       } else {
         // Flatten all groups, deduplicate by id
         const seen = new Set();

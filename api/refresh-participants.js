@@ -389,16 +389,26 @@ export default async function handler(req, res) {
     const allParticipants = await fetchAllParticipants(token, listId);
 
     const byGroup = {};
+    const byGroupName = {};
     for (const p of allParticipants) {
+      // Index by UUID/task-ID (existing behaviour)
       for (const uuid of p.assignedGroupIds) {
         if (!byGroup[uuid]) byGroup[uuid] = [];
         byGroup[uuid].push(p);
       }
+      // Also index by human-readable group name so the API can look up without the UUID map
+      const groupNames = p.assignedGroup
+        ? p.assignedGroup.split(/,\s*/).map((s) => s.trim()).filter(Boolean)
+        : [];
+      for (const name of groupNames) {
+        if (!byGroupName[name]) byGroupName[name] = [];
+        if (!byGroupName[name].find((x) => x.id === p.id)) byGroupName[name].push(p);
+      }
     }
 
     const updatedAt = new Date().toISOString();
-    await redis.set(PARTICIPANTS_CACHE_KEY, JSON.stringify({ byGroup, updatedAt }));
-    console.log('[api/refresh-participants] cached total=', allParticipants.length, 'groups=', Object.keys(byGroup).length);
+    await redis.set(PARTICIPANTS_CACHE_KEY, JSON.stringify({ byGroup, byGroupName, updatedAt }));
+    console.log('[api/refresh-participants] cached total=', allParticipants.length, 'groups=', Object.keys(byGroup).length, 'groupNames=', Object.keys(byGroupName).length);
 
     // Diff and notify only when there was a previous cache to compare against
     let notificationsSent = 0;

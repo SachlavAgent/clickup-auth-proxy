@@ -151,7 +151,6 @@ function mapTask(task) {
   const coStaffField = readFirstField(fields, ['Co-Staff', 'Co Staff', 'CoStaff', 'Co-staff']);
   const gatewayField = readFirstField(fields, ['Gateway', 'Departure Gateway', 'Airport']);
   const genderField = readFirstField(fields, ['Gender', 'Sex', 'gender']);
-  const passwordField = readFirstField(fields, ['Portal Password', 'Password', 'Staffer Password', 'Login Password']);
   const hotelNameField = readFirstField(fields, ['Hotel Name', 'Hotel', 'Hotel/Venue']);
   const hotelCityField = readFirstField(fields, ['Hotel City', 'City', 'Location City']);
   const checkInField = readFirstField(fields, ['Check-in Date', 'Check In Date', 'Checkin Date', 'Hotel Check-in']);
@@ -173,7 +172,6 @@ function mapTask(task) {
     tripTaskIds: parseRelationshipIds(tripIdField),
     status: task.status?.status ?? '',
     gateway: parseDropdownOrText(gatewayField).trim(),
-    password: asString(passwordField?.value).trim(),
     hotelName: parseDropdownOrText(hotelNameField).trim(),
     hotelCity: parseDropdownOrText(hotelCityField).trim(),
     checkInDate: parseDateIso(checkInField),
@@ -181,6 +179,47 @@ function mapTask(task) {
     tripStatus: parseRelationshipStatus(tripIdField).trim(),
     gender: parseDropdownOrText(genderField).trim(),
   };
+}
+
+// Fetch the ClickUp task name for a task ID — used to fill in missing trip names
+async function fetchTaskName(token, taskId) {
+  try {
+    const res = await fetch(`${CLICKUP_BASE}/task/${encodeURIComponent(taskId)}`, {
+      headers: { Authorization: token, Accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.name ?? '').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// When ClickUp doesn't include names in relationship entries, tripId ends up with fewer
+// values than tripTaskIds. Look up any missing task names so every ID has a name.
+async function enrichTripIds(staffers, token) {
+  const missingIds = new Set();
+  for (const s of staffers) {
+    const names = s.tripId ? s.tripId.split(/,\s*/).filter(Boolean) : [];
+    if (s.tripTaskIds.length > names.length) {
+      s.tripTaskIds.slice(names.length).forEach((id) => missingIds.add(id));
+    }
+  }
+  if (missingIds.size === 0) return staffers;
+
+  console.log(`[refresh-staffers] fetching names for ${missingIds.size} unnamed trip task(s)`);
+  const nameMap = {};
+  await Promise.all([...missingIds].map(async (id) => {
+    const name = await fetchTaskName(token, id);
+    if (name) nameMap[id] = name;
+  }));
+
+  return staffers.map((s) => {
+    const names = s.tripId ? s.tripId.split(/,\s*/).filter(Boolean) : [];
+    if (s.tripTaskIds.length <= names.length) return s;
+    const extra = s.tripTaskIds.slice(names.length).map((id) => nameMap[id] || id);
+    return { ...s, tripId: [...names, ...extra].join(', ') };
+  });
 }
 
 async function fetchAllStaffers(token, listId) {
@@ -203,7 +242,8 @@ async function fetchAllStaffers(token, listId) {
     page += 1;
     if (page > 10) break;
   }
-  return tasks.map(mapTask);
+  const staffers = tasks.map(mapTask);
+  return enrichTripIds(staffers, token);
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────

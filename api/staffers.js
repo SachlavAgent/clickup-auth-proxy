@@ -33,8 +33,11 @@ export default async function handler(req, res) {
     }
 
     const value = typeof data === 'string' ? JSON.parse(data) : data;
+    const raw = Array.isArray(value?.staffers) ? value.staffers : [];
+    // Never expose passwords — strip the field regardless of how it reached the cache
+    const staffers = raw.map(({ password, ...s }) => s);
     return res.status(200).json({
-      staffers: Array.isArray(value?.staffers) ? value.staffers : [],
+      staffers,
       updatedAt: value?.updatedAt ?? null,
     });
   } catch (err) {
