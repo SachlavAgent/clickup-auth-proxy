@@ -1,18 +1,17 @@
 import { createClient } from 'redis';
+import { setCorsHeaders, checkApiKey, getClientIp, checkRateLimit, makeRedisGetter } from './_helpers.js';
 
 const CLICKUP_BASE = 'https://api.clickup.com/api/v2';
 const ASSIGNED_GROUP_FIELD_ID = '7b11937f-2af8-41c9-8ed8-f38604be3ef5';
 const PARTICIPANTS_CACHE_KEY = 'participants:cache:v2';
 
-let redisClient = null;
-async function getRedisClient() {
-  if (redisClient) return redisClient;
-  redisClient = createClient({ url: process.env.REDIS_URL });
-  redisClient.on('error', (err) => console.error('[participants] Redis error:', err));
-  await redisClient.connect();
-  return redisClient;
-}
+// Rate limit: 60 reads per IP per minute — enough for normal app usage.
+const IP_RL_MAX = 60;
+const IP_RL_WINDOW = 60;
 
+const getRedisClient = makeRedisGetter(createClient, 'participants');
+
+// Allowlist of known group names. Only these values are accepted as groupName input.
 const GROUP_NAME_TO_UUID = {
   'SA-BR-54-333': 'cd14b78c-95c8-4bc7-a8a5-f340e6efaa4d',
   'SA-BR-54-222': '5518516a-daa1-49d0-8dd7-e5bd636010ae',
@@ -46,6 +45,9 @@ const GROUP_NAME_TO_UUID = {
   'SA-BR-54-179': 'dde425cc-b3cf-4b65-9b3f-be26c9e5b4a3',
   'SA-BR-54-526': '11ba38e0-c115-452d-b514-591043367897',
 };
+
+// Pattern for an additional unknown-group safety net: trip IDs look like SA-XX-NN-NNN
+const GROUP_NAME_RE = /^[A-Z]{2,4}-[A-Z]{2,4}-\d{1,4}-\d{1,4}$/;
 
 const GROUP_FIELD_NAMES = [
   'Assigned Group', 'AssignedGroup', 'Assigned group',
@@ -155,10 +157,6 @@ function splitMulti(value) {
     .filter((s) => s.length > 0);
 }
 
-function normalizeForMatch(s) {
-  return s.replace(/\s+/g, '').replace(/[^a-z0-9]/gi, '').toLowerCase();
-}
-
 function parseCheckbox(field) {
   if (!field) return false;
   const v = field.value;
@@ -206,7 +204,6 @@ function mapParticipant(task) {
     ...splitMulti(dropdownOrText),
   ]));
 
-  // Fallback: scan all fields for a trip-ID-like pattern (e.g. SA-BR-54-222)
   if (!assignedGroup) {
     for (const f of fields) {
       const text = parseRelationshipNames(f) || parseDropdownOrText(f);
@@ -255,13 +252,11 @@ async function fetchAllTasks(token, listId) {
     if (!res.ok) {
       const text = await res.text();
       if (res.status === 401) throw new Error('ClickUp token invalid (401)');
-      throw new Error(`ClickUp fetch failed (${res.status}): ${text.slice(0, 200)}`);
+      throw new Error(`ClickUp fetch failed (${res.status})`);
     }
     const data = await res.json();
     const pageTasks = data.tasks ?? [];
     tasks.push(...pageTasks);
-    console.log(`[api/participants] page=${page} fetched=${pageTasks.length} total=${tasks.length}`);
-    // Stop when we get a partial page — that means there are no more pages
     if (pageTasks.length < PAGE_SIZE) break;
     page += 1;
   }
@@ -271,79 +266,56 @@ async function fetchAllTasks(token, listId) {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Content-Type', 'application/json');
+  setCorsHeaders(res, req, 'GET, OPTIONS');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-  res.setHeader('Pragma', 'no-cache');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'method_not_allowed' });
+
+  // ── Auth ────────────────────────────────────────────────────────────────────
+  if (!checkApiKey(req, res)) return;
 
   const token = (process.env.CLICKUP_API_TOKEN ?? '').trim();
   if (!token) {
     return res.status(500).json({ error: 'clickup_api_token_not_configured' });
   }
 
-  const listId = (process.env.CLICKUP_PARTICIPANTS_LIST_ID ?? '901811520991').trim();
+  // ── Input validation ────────────────────────────────────────────────────────
   const groupName = (req.query.groupName ?? '').trim();
-  const debug = req.query.debug === '1';
 
-  const tripTaskUuid = groupName ? (GROUP_NAME_TO_UUID[groupName] ?? null) : null;
-  if (groupName && !tripTaskUuid) {
-    return res.status(400).json({ error: 'unknown_group_name', groupName });
-  }
-
-  // ── Debug mode: return raw first participant including all fields ──────────
-  if (debug && groupName) {
-    try {
-      const tasks = await fetchAllTasks(token, listId);
-      const filtered = tripTaskUuid
-        ? tasks.filter((t) => {
-            const fields = t.custom_fields ?? [];
-            const groupField = fields.find((f) => f.id === ASSIGNED_GROUP_FIELD_ID);
-            const ids = groupField && Array.isArray(groupField.value)
-              ? groupField.value.map((e) => (typeof e === 'string' ? e : e?.id)).filter(Boolean)
-              : [];
-            return ids.includes(tripTaskUuid);
-          })
-        : tasks;
-      const first = filtered[0] ?? tasks[0] ?? null;
-      if (!first) return res.status(200).json({ debug: true, error: 'no tasks found' });
-      const mapped = mapParticipant(first);
-      return res.status(200).json({
-        debug: true,
-        groupName,
-        tripTaskUuid,
-        totalTasksInList: tasks.length,
-        tasksMatchingGroup: filtered.length,
-        mappedParticipant: mapped,
-        rawCustomFields: (first.custom_fields ?? []).map((f) => ({
-          id: f.id,
-          name: f.name,
-          type: f.type,
-          value: f.value,
-        })),
-      });
-    } catch (err) {
-      return res.status(500).json({ debug: true, error: err.message });
+  // groupName must be empty (admin all-groups) or match the known allowlist.
+  // This prevents arbitrary strings from reaching cache lookups or ClickUp queries.
+  if (groupName && !GROUP_NAME_TO_UUID[groupName]) {
+    // Accept SA-XX-NN-NNN pattern for trip IDs not yet in the allowlist,
+    // but reject anything that doesn't look like a trip ID at all.
+    if (!GROUP_NAME_RE.test(groupName)) {
+      return res.status(400).json({ error: 'invalid_group_name' });
     }
   }
 
-  // ── Try Redis cache first ─────────────────────────────────────────────────
+  const listId = (process.env.CLICKUP_PARTICIPANTS_LIST_ID ?? '901811520991').trim();
+  const tripTaskUuid = groupName ? (GROUP_NAME_TO_UUID[groupName] ?? null) : null;
+
+  // ── Rate limiting ────────────────────────────────────────────────────────────
   try {
     const redis = await getRedisClient();
+    const ip = getClientIp(req);
+    const rl = await checkRateLimit(redis, `rl:participants:ip:${ip}`, IP_RL_MAX, IP_RL_WINDOW);
+    if (!rl.allowed) {
+      res.setHeader('Retry-After', String(rl.retryAfter ?? IP_RL_WINDOW));
+      return res.status(429).json({ error: 'too_many_requests' });
+    }
+
+    // ── Cache lookup ──────────────────────────────────────────────────────────
     const cached = await redis.get(PARTICIPANTS_CACHE_KEY);
     if (cached) {
       const { byGroup, byGroupName } = JSON.parse(cached);
       let participants;
       if (groupName) {
-        // Primary: direct name lookup (works regardless of UUID format)
-        // Fallback: UUID-based lookup via GROUP_NAME_TO_UUID
         participants = (byGroupName && byGroupName[groupName])
           ?? (tripTaskUuid ? (byGroup[tripTaskUuid] ?? []) : []);
       } else {
-        // Flatten all groups, deduplicate by id
         const seen = new Set();
         participants = Object.values(byGroup).flat().filter((p) => {
           if (seen.has(p.id)) return false;
@@ -359,19 +331,24 @@ export default async function handler(req, res) {
     console.warn('[api/participants] Redis unavailable, falling back to ClickUp:', redisErr.message);
   }
 
-  // ── Fallback: fetch directly from ClickUp ─────────────────────────────────
+  // ── Live ClickUp fallback ─────────────────────────────────────────────────
   try {
     const tasks = await fetchAllTasks(token, listId);
     let participants = tasks.map(mapParticipant);
 
     if (tripTaskUuid) {
       participants = participants.filter((p) => p.assignedGroupIds.includes(tripTaskUuid));
+    } else if (groupName) {
+      // Pattern-matched group not in UUID map — filter by name
+      participants = participants.filter((p) =>
+        p.assignedGroup === groupName || p.assignedGroupValues.includes(groupName)
+      );
     }
 
     console.log(`[api/participants] live fetch groupName=${groupName || '(all)'} returned=${participants.length}`);
     return res.status(200).json({ participants, fromCache: false });
   } catch (err) {
     console.error('[api/participants] error:', err);
-    return res.status(500).json({ error: 'internal_server_error', message: err.message });
+    return res.status(500).json({ error: 'internal_server_error' });
   }
 }

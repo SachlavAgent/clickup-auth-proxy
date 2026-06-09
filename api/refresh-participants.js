@@ -1,4 +1,5 @@
 import { createClient } from 'redis';
+import { setCorsHeaders, checkCronOrApiKey, makeRedisGetter } from './_helpers.js';
 
 const PARTICIPANTS_CACHE_KEY = 'participants:cache:v2';
 const CLICKUP_BASE = 'https://api.clickup.com/api/v2';
@@ -46,15 +47,7 @@ const GROUP_FIELD_NAMES = [
   'Group', 'Trip', 'Trip ID', 'Taglit', 'Trip ID=Taglit',
 ];
 
-let redisClient = null;
-
-async function getRedisClient() {
-  if (redisClient) return redisClient;
-  redisClient = createClient({ url: process.env.REDIS_URL });
-  redisClient.on('error', (err) => console.error('Redis error:', err));
-  await redisClient.connect();
-  return redisClient;
-}
+const getRedisClient = makeRedisGetter(createClient, 'refresh-participants');
 
 // ── Field parsing helpers ─────────────────────────────────────────────────────
 
@@ -241,7 +234,6 @@ async function fetchAllParticipants(token, listId) {
     return res.json();
   }
 
-  // Fetch page 0 first to get total count and first batch
   const data0 = await fetchOnePage(0);
   const page0Tasks = data0.tasks ?? [];
   console.log(`[api/refresh-participants] page=0 fetched=${page0Tasks.length}`);
@@ -250,12 +242,9 @@ async function fetchAllParticipants(token, listId) {
     return page0Tasks.map(mapParticipant);
   }
 
-  // ClickUp returns total_count on some plans; fall back to a safe upper bound
   const totalCount = data0.total_count ?? null;
   const totalPages = totalCount != null ? Math.ceil(totalCount / PAGE_SIZE) : 100;
   const remainingNums = Array.from({ length: totalPages - 1 }, (_, i) => i + 1);
-
-  console.log(`[api/refresh-participants] fetching pages 1–${totalPages - 1} in parallel (total_count=${totalCount ?? 'unknown'})`);
 
   const pageResults = await Promise.all(
     remainingNums.map(async (page) => {
@@ -287,7 +276,6 @@ function diffGroups(oldByGroup, newByGroup) {
 }
 
 async function sendPushNotifications(redis, groupChanges) {
-  // Scan all registered push tokens
   const allKeys = [];
   let cursor = 0;
   do {
@@ -298,7 +286,6 @@ async function sendPushNotifications(redis, groupChanges) {
 
   if (allKeys.length === 0) return;
 
-  // Fetch token records in parallel
   const records = await Promise.all(
     allKeys.map(async (key) => {
       const raw = await redis.get(key);
@@ -318,7 +305,7 @@ async function sendPushNotifications(redis, groupChanges) {
       notifications.push({
         to: record.pushToken,
         title: 'Group Update',
-        body: `👋 ${p.name} has been added to your group ${record.groupName}`,
+        body: `${p.name} has been added to your group ${record.groupName}`,
         sound: 'default',
       });
     }
@@ -326,7 +313,7 @@ async function sendPushNotifications(redis, groupChanges) {
       notifications.push({
         to: record.pushToken,
         title: 'Group Update',
-        body: `⚠️ ${p.name} has been removed from your group ${record.groupName}`,
+        body: `${p.name} has been removed from your group ${record.groupName}`,
         sound: 'default',
       });
     }
@@ -335,7 +322,6 @@ async function sendPushNotifications(redis, groupChanges) {
   if (notifications.length === 0) return;
   console.log(`[api/refresh-participants] sending ${notifications.length} push notifications`);
 
-  // Expo push API accepts batches of up to 100
   for (let i = 0; i < notifications.length; i += 100) {
     const batch = notifications.slice(i, i + 100);
     try {
@@ -355,12 +341,15 @@ async function sendPushNotifications(redis, groupChanges) {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Content-Type', 'application/json');
+  // This endpoint is cron/server-to-server only — restrict origin.
+  setCorsHeaders(res, req, 'GET, OPTIONS');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'method_not_allowed' });
+
+  // ── Auth: Vercel cron secret OR API key (for app-triggered manual refresh) ──
+  if (!checkCronOrApiKey(req, res)) return;
 
   const token = (process.env.CLICKUP_API_TOKEN ?? '').trim();
   if (!token) {
@@ -375,7 +364,6 @@ export default async function handler(req, res) {
   try {
     const redis = await getRedisClient();
 
-    // Read existing cache before overwriting so we can diff for push notifications
     let oldByGroup = null;
     try {
       const oldCached = await redis.get(PARTICIPANTS_CACHE_KEY);
@@ -391,12 +379,10 @@ export default async function handler(req, res) {
     const byGroup = {};
     const byGroupName = {};
     for (const p of allParticipants) {
-      // Index by UUID/task-ID (existing behaviour)
       for (const uuid of p.assignedGroupIds) {
         if (!byGroup[uuid]) byGroup[uuid] = [];
         byGroup[uuid].push(p);
       }
-      // Also index by human-readable group name so the API can look up without the UUID map
       const groupNames = p.assignedGroup
         ? p.assignedGroup.split(/,\s*/).map((s) => s.trim()).filter(Boolean)
         : [];
@@ -408,14 +394,12 @@ export default async function handler(req, res) {
 
     const updatedAt = new Date().toISOString();
     await redis.set(PARTICIPANTS_CACHE_KEY, JSON.stringify({ byGroup, byGroupName, updatedAt }));
-    console.log('[api/refresh-participants] cached total=', allParticipants.length, 'groups=', Object.keys(byGroup).length, 'groupNames=', Object.keys(byGroupName).length);
+    console.log('[api/refresh-participants] cached total=', allParticipants.length);
 
-    // Diff and notify only when there was a previous cache to compare against
     let notificationsSent = 0;
     if (oldByGroup) {
       const groupChanges = diffGroups(oldByGroup, byGroup);
       const changedCount = Object.keys(groupChanges).length;
-      console.log(`[api/refresh-participants] groups with changes: ${changedCount}`);
       if (changedCount > 0) {
         await sendPushNotifications(redis, groupChanges);
         notificationsSent = changedCount;
@@ -431,6 +415,6 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error('[api/refresh-participants] error:', err);
-    return res.status(500).json({ error: 'internal_server_error', message: err.message });
+    return res.status(500).json({ error: 'internal_server_error' });
   }
 }

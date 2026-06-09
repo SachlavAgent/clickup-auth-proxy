@@ -1,19 +1,20 @@
 import { createClient } from 'redis';
 import { randomInt } from 'crypto';
 import nodemailer from 'nodemailer';
+import { setCorsHeaders, checkApiKey, getClientIp, checkRateLimit, makeRedisGetter } from './_helpers.js';
 
 const STAFFERS_KEY = 'sachlav:staffers:cache:v1';
 const OTP_TTL_SECONDS = 600;
 
-let redisClient = null;
+// Rate limits: 5 sends per email per 15 min, 20 per IP per hour.
+const EMAIL_RL_MAX = 5;
+const EMAIL_RL_WINDOW = 900;
+const IP_RL_MAX = 20;
+const IP_RL_WINDOW = 3600;
 
-async function getRedisClient() {
-  if (redisClient) return redisClient;
-  redisClient = createClient({ url: process.env.REDIS_URL });
-  redisClient.on('error', (err) => console.error('[send-otp] Redis error:', err));
-  await redisClient.connect();
-  return redisClient;
-}
+const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+
+const getRedisClient = makeRedisGetter(createClient, 'send-otp');
 
 async function sendOtpEmail(to, code) {
   const gmailUser = process.env.GMAIL_USER;
@@ -45,13 +46,7 @@ async function sendOtpEmail(to, code) {
       secure: true,
       auth: { user: gmailUser, pass: gmailPass },
     });
-    await transporter.sendMail({
-      from: `"Sachlav Staff Hub" <${gmailUser}>`,
-      to,
-      subject,
-      text,
-      html,
-    });
+    await transporter.sendMail({ from: `"Sachlav Staff Hub" <${gmailUser}>`, to, subject, text, html });
     return;
   }
 
@@ -69,57 +64,76 @@ async function sendOtpEmail(to, code) {
     return;
   }
 
-  // Dev mode — no email provider configured, log the code to console.
-  console.log(`[send-otp] DEV MODE — OTP for ${to}: ${code}`);
+  // Dev mode — log that email was sent but never log the code value.
+  console.log(`[send-otp] DEV MODE — OTP sent to ${to} (no email provider configured)`);
 }
 
 export default async function handler(req, res) {
   res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
+  setCorsHeaders(res, req, 'POST, OPTIONS');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'method_not_allowed' });
+
+  // ── Auth ────────────────────────────────────────────────────────────────────
+  if (!checkApiKey(req, res)) return;
 
   try {
     const body = req.body && typeof req.body === 'object' ? req.body : JSON.parse(req.body || '{}');
     const email = (body?.email ?? '').trim().toLowerCase();
 
-    if (!email || !email.includes('@')) {
+    if (!email || !EMAIL_RE.test(email)) {
       return res.status(400).json({ error: 'invalid_body', message: 'Expected { email: string }' });
     }
 
+    const redis = await getRedisClient();
+
+    // ── Rate limiting ──────────────────────────────────────────────────────────
+    const ip = getClientIp(req);
+    const [emailRl, ipRl] = await Promise.all([
+      checkRateLimit(redis, `rl:send:email:${email}`, EMAIL_RL_MAX, EMAIL_RL_WINDOW),
+      checkRateLimit(redis, `rl:send:ip:${ip}`, IP_RL_MAX, IP_RL_WINDOW),
+    ]);
+
+    if (!emailRl.allowed) {
+      res.setHeader('Retry-After', String(emailRl.retryAfter ?? EMAIL_RL_WINDOW));
+      return res.status(429).json({ error: 'too_many_requests', message: 'Too many login attempts. Please wait before trying again.' });
+    }
+    if (!ipRl.allowed) {
+      res.setHeader('Retry-After', String(ipRl.retryAfter ?? IP_RL_WINDOW));
+      return res.status(429).json({ error: 'too_many_requests', message: 'Too many requests from this location.' });
+    }
+
+    // ── Staffer lookup — fail closed if cache is empty ─────────────────────────
     const adminEmail = (process.env.ADMIN_EMAIL ?? '').trim().toLowerCase();
     const isAdmin = adminEmail && email === adminEmail;
 
     if (!isAdmin) {
-      const redis = await getRedisClient();
       const raw = await redis.get(STAFFERS_KEY);
-      if (raw) {
-        const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        const staffers = Array.isArray(value?.staffers) ? value.staffers : [];
-        const found = staffers.some((s) => (s.email ?? '').trim().toLowerCase() === email);
-        if (!found) {
-          return res.status(404).json({
-            error: 'not_found',
-            message: 'This email is not registered in the staff list.',
-          });
-        }
-      } else {
-        console.warn('[send-otp] staffer cache empty — allowing through');
+      if (raw === null) {
+        // Fail closed — never allow login when the staff registry is unavailable.
+        console.error('[send-otp] staffer cache empty — rejecting OTP request');
+        return res.status(503).json({
+          error: 'service_unavailable',
+          message: 'Staff registry is temporarily unavailable. Please try again in a few minutes.',
+        });
+      }
+      const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const staffers = Array.isArray(value?.staffers) ? value.staffers : [];
+      const found = staffers.some((s) => (s.email ?? '').trim().toLowerCase() === email);
+      if (!found) {
+        return res.status(404).json({ error: 'not_found', message: 'This email is not registered in the staff list.' });
       }
     }
 
+    // ── Generate and store OTP ─────────────────────────────────────────────────
     const code = String(randomInt(100000, 1000000));
-    const redis = await getRedisClient();
     await redis.setEx(`otp:${email}`, OTP_TTL_SECONDS, code);
-
     await sendOtpEmail(email, code);
 
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('[send-otp] error:', err);
-    return res.status(500).json({ error: 'server_error', message: err.message });
+    return res.status(500).json({ error: 'server_error', message: 'Internal server error.' });
   }
 }
